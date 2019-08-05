@@ -7,11 +7,14 @@ import numpy as np
 from bert.tokenization import FullTokenizer
 from tqdm import tqdm
 from tensorflow.keras import backend as K
-
+import csv
+from matplotlib import pyplot
+from keras.callbacks import EarlyStopping
+from keras.callbacks import ModelCheckpoint
 # Initialize session
 sess = tf.Session()
 
-classes = 13 #3 classes in labelling
+classes = 14 #14 classes in labelling
 
 # Load tweets from the csv file
 def load_datasets_csv(file_path):
@@ -136,7 +139,7 @@ def convert_examples_to_features(tokenizer, examples, max_seq_length=256):
         np.array(input_ids),
         np.array(input_masks),
         np.array(segment_ids),
-        # Make sure that the labels tensor gets reshaped to have 13 columns
+        # Make sure that the labels tensor gets reshaped to have 14 columns
         np.array(labels).reshape(-1, classes),
     )
 
@@ -243,6 +246,46 @@ class BertLayer(tf.layers.Layer):
     def compute_output_shape(self, input_shape):
         return (input_shape[0], self.output_size)
 
+    #Save  custom data so that the BertLayer can be loaded
+    def get_config(self):
+        config = {"n_fine_tune_layers": self.n_fine_tune_layers,
+        "trainable": self.trainable,
+        "pooling": self.pooling,
+        "bert_path": self.bert_path
+        }
+        #base_config = super(BertLayer, self).get_config()
+        #return dict(list(base_config.items()) + list(config.items()))
+        return config
+
+#Threshold for outputs. We will use t = 0.2
+def pred_thresh(y, t):
+    return np.round(y - t + 0.5)
+
+#Recall score: true positives / (true positives + true negatives)
+def recall_m(y_true, y_pred):
+        true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+        possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
+        recall = true_positives / (possible_positives + K.epsilon())
+        return recall
+
+#Recall score: true positives / (true positives + false positives)
+def precision_m(y_true, y_pred):
+        true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+        predicted_positives = K.sum(K.round(K.clip(y_pred, 0, 1)))
+        precision = true_positives / (predicted_positives + K.epsilon())
+        return precision
+
+#F-beta score for evaluating multi-label predictions, usually beta = 1 is used
+def F_beta(beta, y_true, y_pred):
+    #Convert output to actual predictions with threshold 0.2
+
+    y_pred_rounded = pred_thresh_tensor(y_pred, 0.2)
+    precision = precision_m(y_true, y_pred_rounded)
+    recall = recall_m(y_true, y_pred_rounded)
+    return (1 + beta ** 2) * ((precision * recall)/(beta ** 2 * precision + recall + K.epsilon()))
+
+def F1(y_true, y_pred):
+    return F_beta(1, y_true, y_pred)
 
 # Build model
 def build_model(max_seq_length):
@@ -251,8 +294,11 @@ def build_model(max_seq_length):
     in_segment = tf.keras.layers.Input(shape=(max_seq_length,), name="segment_ids")
     bert_inputs = [in_id, in_mask, in_segment]
 
+    #Added dropout layers to deal with early overfitting
     bert_output = BertLayer(n_fine_tune_layers=3)(bert_inputs)
+    bert_output = tf.keras.layers.Dropout(0.5)(bert_output)
     dense = tf.keras.layers.Dense(256, activation="relu")(bert_output)
+    dense = tf.keras.layers.Dropout(0.5)(dense)
     pred = tf.keras.layers.Dense(classes, activation="sigmoid")(dense)
 
     model = tf.keras.models.Model(inputs=bert_inputs, outputs=pred)
@@ -268,26 +314,27 @@ def initialize_vars(sess):
     sess.run(tf.tables_initializer())
     K.set_session(sess)
 
-
 def main():
     # Params for bert model and tokenization
     bert_path = "https://tfhub.dev/google/bert_uncased_L-12_H-768_A-12/1"
-    max_seq_length = 256
+
+    #Shorten max_seq_length to reduce memory
+    max_seq_length = 128
 
     #Take datasets to be the tweets csv
-    train_df, test_df = load_datasets_csv("tweets.csv")
+    train_df, test_df = load_datasets_csv("modified_tweets.csv")
 
     # Create datasets (Only take up to max_seq_length words for memory)
     train_text = train_df["tweet_content"].tolist()
     train_text = [" ".join(t.split()[0:max_seq_length]) for t in train_text]
     train_text = np.array(train_text, dtype=object)[:, np.newaxis]
-    #Extract the 13 columns containing the ESG categories
-    train_label = train_df.iloc[:, 6:].values.tolist()
+    #Extract the 14 columns containing the ESG categories
+    train_label = train_df.iloc[:, 6:-1].values.tolist()
 
     test_text = test_df["tweet_content"].tolist()
     test_text = [" ".join(t.split()[0:max_seq_length]) for t in test_text]
     test_text = np.array(test_text, dtype=object)[:, np.newaxis]
-    test_label = test_df.iloc[:, 6:].values.tolist()
+    test_label = test_df.iloc[:, 6:-1].values.tolist()
 
     # Instantiate tokenizer
     tokenizer = create_tokenizer_from_hub_module(bert_path)
@@ -314,22 +361,72 @@ def main():
         tokenizer, test_examples, max_seq_length=max_seq_length
     )
 
+    print(test_input_ids)
+
     model = build_model(max_seq_length)
 
     # Instantiate variables
     initialize_vars(sess)
 
-    model.fit(
+    #Early stopping that waits 20 epochs after first increase in val_loss in order to avoid local minima
+    es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=20)
+    #Automatically save the best model (according to accuracy)
+    #mc = ModelCheckpoint('best_acc_model.h5', monitor='val_acc', mode='max', verbose=1, save_best_only=True)
+    #Save the model with least loss
+    mc = ModelCheckpoint('least_loss_model.h5', monitor='val_loss', mode='min', verbose=1, save_best_only=True)
+    #Save model with best F1 score
+    #mc = ModelCheckpoint('best_F1_model.h5', monitor='val_F1', mode='max', verbose=1, save_best_only=True)
+
+    history = model.fit(
         [train_input_ids, train_input_masks, train_segment_ids],
         train_labels,
         validation_data=(
             [test_input_ids, test_input_masks, test_segment_ids],
             test_labels,
         ),
-        epochs=1,
+        epochs=100,
         batch_size=32,
+        callbacks=[es, mc],
+        verbose=1
     )
 
+    # evaluate the model
+    _, train_acc = model.evaluate([train_input_ids, train_input_masks, train_segment_ids], train_labels, verbose=0)
+    _, test_acc = model.evaluate([test_input_ids, test_input_masks, test_segment_ids], test_labels, verbose=0)
+    print('Train: %.3f, Test: %.3f' % (train_acc, test_acc))
+    # plot training history
+    pyplot.plot(history.history['loss'], label='train')
+    pyplot.plot(history.history['val_loss'], label='test')
+    pyplot.legend()
+    pyplot.show()
+
+    #Write sample predictions to predictions.csv
+    with open('predictions.csv', mode='w') as file:
+        file_writer = csv.writer(file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        #Column names
+        file_writer.writerow(["Actual/Predicted",
+        "Corporate Behaviour - Business Ethics",
+        "Corporate Behaviour - Business Ethics",
+        "Corporate Behaviour - Anti-Competitive Practices",
+        "Corporate Behaviour - Corruption & Instability",
+        "Privacy & Data Security",
+        "Human Capital - Discrimination (Added by RiskLab Team)",
+        "Pollution & Waste - Toxic Emissions & Waste",
+        "Human Capital - Health & Demographic Risk",
+        "Human Capital - Supply Chain Labour Standards or Labour Management",
+        "Climate Change - Carbon Emissions",
+        "Product Liability - Product Quality & Safety",
+        "Positive",
+        "Negative",
+        "Neutral",
+        "Tied to Specific Company(Y/N)"])
+        for i in range(50):
+            #Make 25 sample prediction using the trained model from test data
+            pred = model.predict([test_input_ids[i:i+1], test_input_masks[i:i+1], test_segment_ids[i:i+1]])
+            pred = map(lambda x: np.round(x + 0.3), pred)
+            file_writer.writerow(pred) #Predicted labels
+            file_writer.writerow(test_labels[i]) #Actual labels
+            file_writer.writerow("--------------------------------------------")
 
 if __name__ == "__main__":
     main()
