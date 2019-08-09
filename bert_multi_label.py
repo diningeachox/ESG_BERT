@@ -11,6 +11,10 @@ import csv
 from matplotlib import pyplot
 from keras.callbacks import EarlyStopping
 from keras.callbacks import ModelCheckpoint
+from keras import regularizers
+from keras.regularizers import l2
+from keras.layers import Lambda
+
 # Initialize session
 sess = tf.Session()
 
@@ -23,16 +27,10 @@ def load_datasets_csv(file_path):
     #Replace the NaN's by 0
     df.replace(np.nan, '0', inplace=True)
 
-    # 80% training data, 20% testing data
-    total_rows = len(df.index)
-    train_rows = np.floor(0.8 * total_rows).astype(int)
-    test_rows = total_rows - train_rows
-
-    #Shuffle the dataframe to randomize the samples
-    df.sample(frac=1).reset_index(drop=True)
-    #Divide train/test into two separate Dataframes
-    train_df = df.head(train_rows)
-    test_df = df.tail(test_rows)
+    #Select every fifth row to form our test set (so as to be representative of our data)
+    test_df = df.iloc[::5, :]
+    #Training set will be all the rest (by dropping every 5th row)
+    train_df = df.drop(df.index[::5], 0)
 
     return train_df, test_df
 
@@ -257,35 +255,48 @@ class BertLayer(tf.layers.Layer):
         #return dict(list(base_config.items()) + list(config.items()))
         return config
 
-#Threshold for outputs. We will use t = 0.2
-def pred_thresh(y, t):
-    return np.round(y - t + 0.5)
+#Recall score(or TPR): true positives / (true positives + false negatives)
+def recall_m(y_true, y_pred, t=0):
+    #Use our custom threshold of t
+    rounded_y_pred = np.round(y_pred + t)
+    #Convert arrays to tensors with new Keras version
+    y_pred = tf.convert_to_tensor(rounded_y_pred, tf.float32)
+    y_true = tf.convert_to_tensor(y_true, tf.float32)
+    prod = K.clip(y_true * y_pred, 0, 1)
 
-#Recall score: true positives / (true positives + true negatives)
-def recall_m(y_true, y_pred):
-        true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
-        possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
-        recall = true_positives / (possible_positives + K.epsilon())
-        return recall
+    true_positives = K.sum(K.round(prod))
+    possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
+    recall = true_positives / (possible_positives + K.epsilon())
+    return recall
 
 #Recall score: true positives / (true positives + false positives)
-def precision_m(y_true, y_pred):
-        true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
-        predicted_positives = K.sum(K.round(K.clip(y_pred, 0, 1)))
-        precision = true_positives / (predicted_positives + K.epsilon())
-        return precision
+def precision_m(y_true, y_pred, t=0):
+    #Use our custom threshold of t
+    rounded_y_pred = np.round(y_pred + t)
+    #Convert arrays to tensors with new Keras version
+    y_pred = tf.convert_to_tensor(rounded_y_pred, tf.float32)
+    y_true = tf.convert_to_tensor(y_true, tf.float32)
+    prod = K.clip(y_true * y_pred, 0, 1)
 
-#F-beta score for evaluating multi-label predictions, usually beta = 1 is used
-def F_beta(beta, y_true, y_pred):
-    #Convert output to actual predictions with threshold 0.2
+    true_positives = K.sum(K.round(prod))
+    predicted_positives = K.sum(K.round(K.clip(y_pred, 0, 1)))
+    precision = true_positives / (predicted_positives + K.epsilon())
+    return precision
 
-    y_pred_rounded = pred_thresh_tensor(y_pred, 0.2)
-    precision = precision_m(y_true, y_pred_rounded)
-    recall = recall_m(y_true, y_pred_rounded)
-    return (1 + beta ** 2) * ((precision * recall)/(beta ** 2 * precision + recall + K.epsilon()))
+#FPR score: false positives / (false positives + true negatives)
+def fpr_m(y_true, y_pred, t=0):
+    #Use our custom threshold of t
+    rounded_y_pred = np.round(y_pred + t)
+    #Convert arrays to tensors with new Keras version
+    y_pred = tf.convert_to_tensor(rounded_y_pred, tf.float32)
+    y_true = tf.convert_to_tensor(y_true, tf.float32)
+    inverted_y_true = Lambda(lambda x: 1 - x)(y_true) #Flip 1's and 0's
+    prod = K.clip(inverted_y_true * y_pred, 0, 1)
 
-def F1(y_true, y_pred):
-    return F_beta(1, y_true, y_pred)
+    false_positives = K.sum(K.round(prod))
+    all_negatives = K.sum(K.round(K.clip(inverted_y_true, 0, 1)))
+    fpr = false_positives / (all_negatives + K.epsilon())
+    return fpr
 
 # Build model
 def build_model(max_seq_length):
@@ -295,10 +306,10 @@ def build_model(max_seq_length):
     bert_inputs = [in_id, in_mask, in_segment]
 
     #Added dropout layers to deal with early overfitting
-    bert_output = BertLayer(n_fine_tune_layers=3)(bert_inputs)
-    bert_output = tf.keras.layers.Dropout(0.5)(bert_output)
+    bert_output = BertLayer(n_fine_tune_layers=0)(bert_inputs)
+    bert_output = tf.keras.layers.Dropout(0.5)(bert_output) #Dropout
     dense = tf.keras.layers.Dense(256, activation="relu")(bert_output)
-    dense = tf.keras.layers.Dropout(0.5)(dense)
+    dense = tf.keras.layers.Dropout(0.5)(dense) #Dropout
     pred = tf.keras.layers.Dense(classes, activation="sigmoid")(dense)
 
     model = tf.keras.models.Model(inputs=bert_inputs, outputs=pred)
@@ -330,11 +341,15 @@ def main():
     train_text = np.array(train_text, dtype=object)[:, np.newaxis]
     #Extract the 14 columns containing the ESG categories
     train_label = train_df.iloc[:, 6:-1].values.tolist()
+    #Convert str to float
+    train_label = [[float(entry) for entry in row] for row in train_label]
 
     test_text = test_df["tweet_content"].tolist()
     test_text = [" ".join(t.split()[0:max_seq_length]) for t in test_text]
     test_text = np.array(test_text, dtype=object)[:, np.newaxis]
     test_label = test_df.iloc[:, 6:-1].values.tolist()
+    #Convert str to float
+    test_label = [[float(entry) for entry in row] for row in test_label]
 
     # Instantiate tokenizer
     tokenizer = create_tokenizer_from_hub_module(bert_path)
@@ -361,21 +376,19 @@ def main():
         tokenizer, test_examples, max_seq_length=max_seq_length
     )
 
-    print(test_input_ids)
 
     model = build_model(max_seq_length)
+    #Set learning rate of the model
+    K.set_value(model.optimizer.lr, 0.001)
+    print("Learning rate: %f"%K.get_value(model.optimizer.lr))
 
     # Instantiate variables
     initialize_vars(sess)
 
-    #Early stopping that waits 20 epochs after first increase in val_loss in order to avoid local minima
-    es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=20)
-    #Automatically save the best model (according to accuracy)
-    #mc = ModelCheckpoint('best_acc_model.h5', monitor='val_acc', mode='max', verbose=1, save_best_only=True)
-    #Save the model with least loss
-    mc = ModelCheckpoint('least_loss_model.h5', monitor='val_loss', mode='min', verbose=1, save_best_only=True)
-    #Save model with best F1 score
-    #mc = ModelCheckpoint('best_F1_model.h5', monitor='val_F1', mode='max', verbose=1, save_best_only=True)
+    #Early stopping that waits 15 epochs after first increase in val_loss in order to avoid local minima
+    es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=15)
+    #Save the model with least validation loss
+    mc = ModelCheckpoint('least_loss_model_d05_lr=3_ft=0.h5', monitor='val_loss', mode='min', verbose=1, save_best_only=True)
 
     history = model.fit(
         [train_input_ids, train_input_masks, train_segment_ids],
@@ -400,33 +413,6 @@ def main():
     pyplot.legend()
     pyplot.show()
 
-    #Write sample predictions to predictions.csv
-    with open('predictions.csv', mode='w') as file:
-        file_writer = csv.writer(file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-        #Column names
-        file_writer.writerow(["Actual/Predicted",
-        "Corporate Behaviour - Business Ethics",
-        "Corporate Behaviour - Business Ethics",
-        "Corporate Behaviour - Anti-Competitive Practices",
-        "Corporate Behaviour - Corruption & Instability",
-        "Privacy & Data Security",
-        "Human Capital - Discrimination (Added by RiskLab Team)",
-        "Pollution & Waste - Toxic Emissions & Waste",
-        "Human Capital - Health & Demographic Risk",
-        "Human Capital - Supply Chain Labour Standards or Labour Management",
-        "Climate Change - Carbon Emissions",
-        "Product Liability - Product Quality & Safety",
-        "Positive",
-        "Negative",
-        "Neutral",
-        "Tied to Specific Company(Y/N)"])
-        for i in range(50):
-            #Make 25 sample prediction using the trained model from test data
-            pred = model.predict([test_input_ids[i:i+1], test_input_masks[i:i+1], test_segment_ids[i:i+1]])
-            pred = map(lambda x: np.round(x + 0.3), pred)
-            file_writer.writerow(pred) #Predicted labels
-            file_writer.writerow(test_labels[i]) #Actual labels
-            file_writer.writerow("--------------------------------------------")
 
 if __name__ == "__main__":
     main()
