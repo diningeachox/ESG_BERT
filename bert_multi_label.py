@@ -6,11 +6,12 @@ import re
 import numpy as np
 from bert.tokenization import FullTokenizer
 from tqdm import tqdm
-from tensorflow.keras import backend as K
+import tensorflow.keras.backend as K
 import csv
 from matplotlib import pyplot
-from keras.callbacks import EarlyStopping
-from keras.callbacks import ModelCheckpoint
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.callbacks import ModelCheckpoint
+from tensorflow.keras.callbacks import LearningRateScheduler
 from keras import regularizers
 from keras.regularizers import l2
 from keras.layers import Lambda
@@ -27,10 +28,21 @@ def load_datasets_csv(file_path):
     #Replace the NaN's by 0
     df.replace(np.nan, '0', inplace=True)
 
+    total_rows = len(df.index)
+    train_rows = np.floor(0.8 * total_rows).astype(int)
+    test_rows = total_rows = train_rows
+
+    df = df.sample(frac=1).reset_index(drop=True)
+
+    test_df = df.head(train_rows)
+    train_df = df.tail(test_rows)
+
+    '''
     #Select every fifth row to form our test set (so as to be representative of our data)
     test_df = df.iloc[::5, :]
     #Training set will be all the rest (by dropping every 5th row)
     train_df = df.drop(df.index[::5], 0)
+    '''
 
     return train_df, test_df
 
@@ -152,7 +164,7 @@ def convert_text_to_examples(texts, labels):
     return InputExamples
 
 
-class BertLayer(tf.layers.Layer):
+class BertLayer(tf.keras.layers.Layer):
     def __init__(
         self,
         n_fine_tune_layers=10,
@@ -256,6 +268,20 @@ class BertLayer(tf.layers.Layer):
         return config
 
 #Recall score(or TPR): true positives / (true positives + false negatives)
+def recall_single(y_true, y_pred, t, place):
+    #Use our custom threshold of t
+    rounded_y_pred = np.round(y_pred[:,place] + t)
+    #Convert arrays to tensors with new Keras version
+    y_pred = tf.convert_to_tensor(rounded_y_pred, tf.float32)
+    y_true = tf.convert_to_tensor(y_true[:,place], tf.float32)
+    prod = K.clip(y_true * y_pred, 0, 1)
+
+    true_positives = K.sum(K.round(prod))
+    possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
+    recall = true_positives / (possible_positives + K.epsilon())
+    return recall
+
+#Recall score(or TPR): true positives / (true positives + false negatives)
 def recall_m(y_true, y_pred, t=0):
     #Use our custom threshold of t
     rounded_y_pred = np.round(y_pred + t)
@@ -266,6 +292,20 @@ def recall_m(y_true, y_pred, t=0):
 
     true_positives = K.sum(K.round(prod))
     possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
+    recall = true_positives / (possible_positives + K.epsilon())
+    return recall
+
+#Recall score(or TPR): true positives / (true positives + false negatives)
+def precision_single(y_true, y_pred, t, place):
+    #Use our custom threshold of t
+    rounded_y_pred = np.round(y_pred[:,place] + t)
+    #Convert arrays to tensors with new Keras version
+    y_pred = tf.convert_to_tensor(rounded_y_pred, tf.float32)
+    y_true = tf.convert_to_tensor(y_true[:,place], tf.float32)
+    prod = K.clip(y_true * y_pred, 0, 1)
+
+    true_positives = K.sum(K.round(prod))
+    possible_positives = K.sum(K.round(K.clip(y_pred, 0, 1)))
     recall = true_positives / (possible_positives + K.epsilon())
     return recall
 
@@ -282,6 +322,21 @@ def precision_m(y_true, y_pred, t=0):
     predicted_positives = K.sum(K.round(K.clip(y_pred, 0, 1)))
     precision = true_positives / (predicted_positives + K.epsilon())
     return precision
+
+#FPR score: false positives / (false positives + true negatives)
+def fpr_single(y_true, y_pred, t, place):
+    #Use our custom threshold of t
+    rounded_y_pred = np.round(y_pred[:,place] + t)
+    #Convert arrays to tensors with new Keras version
+    y_pred = tf.convert_to_tensor(rounded_y_pred, tf.float32)
+    y_true = tf.convert_to_tensor(y_true[:,place], tf.float32)
+    inverted_y_true = Lambda(lambda x: 1 - x)(y_true) #Flip 1's and 0's
+    prod = K.clip(inverted_y_true * y_pred, 0, 1)
+
+    false_positives = K.sum(K.round(prod))
+    all_negatives = K.sum(K.round(K.clip(inverted_y_true, 0, 1)))
+    fpr = false_positives / (all_negatives + K.epsilon())
+    return fpr
 
 #FPR score: false positives / (false positives + true negatives)
 def fpr_m(y_true, y_pred, t=0):
@@ -305,25 +360,84 @@ def build_model(max_seq_length):
     in_segment = tf.keras.layers.Input(shape=(max_seq_length,), name="segment_ids")
     bert_inputs = [in_id, in_mask, in_segment]
 
-    #Added dropout layers to deal with early overfitting
+    #Freeze BERT layers for the first stage of training
     bert_output = BertLayer(n_fine_tune_layers=0)(bert_inputs)
-    bert_output = tf.keras.layers.Dropout(0.5)(bert_output) #Dropout
+    bert_output.trainable = False
     dense = tf.keras.layers.Dense(256, activation="relu")(bert_output)
-    dense = tf.keras.layers.Dropout(0.5)(dense) #Dropout
+    dense.trainable = False
     pred = tf.keras.layers.Dense(classes, activation="sigmoid")(dense)
+    pred.trainable = False
 
-    model = tf.keras.models.Model(inputs=bert_inputs, outputs=pred)
+    #Two extra FC layers added at the end
+    fc1 = tf.keras.layers.Dense(classes, activation="sigmoid")(pred)
+    fc2 = tf.keras.layers.Dense(classes, activation="sigmoid")(fc1)
+
+    model = tf.keras.models.Model(inputs=bert_inputs, outputs=fc2)
     model.compile(loss="binary_crossentropy", optimizer="adam", metrics=["accuracy"])
     model.summary()
 
     return model
 
+#Custom callback function to start the second stage of Training
+class StageTwo(tf.keras.callbacks.Callback):
+    """Enter second stage of training when the validation loss stops decreasing.
+
+  Arguments:
+      patience: Number of epochs to wait after min has been hit. After this
+      number of no improvement, training stops.
+  """
+
+    def __init__(self, patience=0):
+        super(StageTwo, self).__init__()
+
+        self.patience = patience
+
+        # best_weights to store the weights at which the minimum loss occurs.
+        self.best_weights = None
+
+    def on_train_begin(self, logs=None):
+        # The number of epoch it has waited when loss is no longer minimum.
+        self.wait = 0
+        # The epoch the training stops at.
+        self.stopped_epoch = 0
+        # Initialize the best as infinity.
+        self.best = np.Inf
+
+    def on_epoch_end(self, epoch, logs=None):
+        current = logs.get('val_loss')
+        if np.less(current, self.best):
+            print("\nValidation loss improved from {0:.4f} to {0:.4f}".format(self.best, current))
+            self.best = current
+            self.wait = 0
+            # Record the best weights if current results is better (less).
+            self.best_weights = self.model.get_weights()
+
+        else:
+            self.wait += 1
+            if self.wait >= self.patience:
+                self.stopped_epoch = epoch
+                self.model.stop_training = True
+
+                #Unfreeze the BERT layers
+                for layer in self.model.layers:
+                    layer.trainable = True
+
+                print('\nUnfreezing the BERT layers.')
+                self.model.set_weights(self.best_weights)
+
+    def on_train_end(self, logs=None):
+        if self.stopped_epoch > 0:
+            #Unfreeze the BERT layers
+            for layer in self.model.layers:
+                layer.trainable = True
+            print('\nEpoch %05d: Ending first stage of training' % (self.stopped_epoch + 1))
 
 def initialize_vars(sess):
     sess.run(tf.local_variables_initializer())
     sess.run(tf.global_variables_initializer())
     sess.run(tf.tables_initializer())
     K.set_session(sess)
+
 
 def main():
     # Params for bert model and tokenization
@@ -379,7 +493,7 @@ def main():
 
     model = build_model(max_seq_length)
     #Set learning rate of the model
-    K.set_value(model.optimizer.lr, 0.001)
+    K.set_value(model.optimizer.lr, 0.001) #Higher learning rate for first stage
     print("Learning rate: %f"%K.get_value(model.optimizer.lr))
 
     # Instantiate variables
@@ -388,8 +502,25 @@ def main():
     #Early stopping that waits 15 epochs after first increase in val_loss in order to avoid local minima
     es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=15)
     #Save the model with least validation loss
-    mc = ModelCheckpoint('least_loss_model_d05_lr=3_ft=0.h5', monitor='val_loss', mode='min', verbose=1, save_best_only=True)
+    mc = ModelCheckpoint('least_loss_model_two-stage.h5', monitor='val_loss', mode='min', verbose=1, save_best_only=True)
 
+    #First stage
+    history = model.fit(
+        [train_input_ids, train_input_masks, train_segment_ids],
+        train_labels,
+        validation_data=(
+            [test_input_ids, test_input_masks, test_segment_ids],
+            test_labels,
+        ),
+        epochs=100,
+        batch_size=32,
+        callbacks=[StageTwo(10)],
+        verbose=1
+    )
+
+    print("Beginning stage two of training.")
+
+    #Second stage (unforzen BERT layers)
     history = model.fit(
         [train_input_ids, train_input_masks, train_segment_ids],
         train_labels,
