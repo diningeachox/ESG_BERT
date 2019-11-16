@@ -30,12 +30,12 @@ def load_datasets_csv(file_path):
 
     total_rows = len(df.index)
     train_rows = np.floor(0.8 * total_rows).astype(int)
-    test_rows = total_rows = train_rows
+    test_rows = total_rows - train_rows
 
     df = df.sample(frac=1).reset_index(drop=True)
 
-    test_df = df.head(train_rows)
-    train_df = df.tail(test_rows)
+    train_df = df.head(train_rows)
+    test_df = df.tail(test_rows)
 
     '''
     #Select every fifth row to form our test set (so as to be representative of our data)
@@ -360,17 +360,18 @@ def build_model(max_seq_length):
     in_segment = tf.keras.layers.Input(shape=(max_seq_length,), name="segment_ids")
     bert_inputs = [in_id, in_mask, in_segment]
 
+    dropout_rate = 0
     #Freeze BERT layers for the first stage of training
-    bert_output = BertLayer(n_fine_tune_layers=0)(bert_inputs)
-    bert_output.trainable = False
-    dense = tf.keras.layers.Dense(256, activation="relu")(bert_output)
-    dense.trainable = False
-    pred = tf.keras.layers.Dense(classes, activation="sigmoid")(dense)
-    pred.trainable = False
-
+    bert_output = BertLayer(n_fine_tune_layers=3, trainable=False)(bert_inputs)
+    #bert_output.trainable = False
+    dense = tf.keras.layers.Dense(256, activation="sigmoid", trainable=False)(bert_output)
+    dense_dropout = tf.keras.layers.Dropout(rate=dropout_rate)(dense)
+    pred = tf.keras.layers.Dense(classes, activation="sigmoid", trainable=False)(dense_dropout)
+    pred_dropout = tf.keras.layers.Dropout(rate=dropout_rate)(pred)
     #Two extra FC layers added at the end
-    fc1 = tf.keras.layers.Dense(classes, activation="sigmoid")(pred)
-    fc2 = tf.keras.layers.Dense(classes, activation="sigmoid")(fc1)
+    fc1 = tf.keras.layers.Dense(classes, activation="sigmoid")(pred_dropout)
+    fc1_dropout = tf.keras.layers.Dropout(rate=dropout_rate)(fc1)
+    fc2 = tf.keras.layers.Dense(classes, activation="sigmoid")(fc1_dropout)
 
     model = tf.keras.models.Model(inputs=bert_inputs, outputs=fc2)
     model.compile(loss="binary_crossentropy", optimizer="adam", metrics=["accuracy"])
@@ -378,59 +379,6 @@ def build_model(max_seq_length):
 
     return model
 
-#Custom callback function to start the second stage of Training
-class StageTwo(tf.keras.callbacks.Callback):
-    """Enter second stage of training when the validation loss stops decreasing.
-
-  Arguments:
-      patience: Number of epochs to wait after min has been hit. After this
-      number of no improvement, training stops.
-  """
-
-    def __init__(self, patience=0):
-        super(StageTwo, self).__init__()
-
-        self.patience = patience
-
-        # best_weights to store the weights at which the minimum loss occurs.
-        self.best_weights = None
-
-    def on_train_begin(self, logs=None):
-        # The number of epoch it has waited when loss is no longer minimum.
-        self.wait = 0
-        # The epoch the training stops at.
-        self.stopped_epoch = 0
-        # Initialize the best as infinity.
-        self.best = np.Inf
-
-    def on_epoch_end(self, epoch, logs=None):
-        current = logs.get('val_loss')
-        if np.less(current, self.best):
-            print("\nValidation loss improved from {0:.4f} to {0:.4f}".format(self.best, current))
-            self.best = current
-            self.wait = 0
-            # Record the best weights if current results is better (less).
-            self.best_weights = self.model.get_weights()
-
-        else:
-            self.wait += 1
-            if self.wait >= self.patience:
-                self.stopped_epoch = epoch
-                self.model.stop_training = True
-
-                #Unfreeze the BERT layers
-                for layer in self.model.layers:
-                    layer.trainable = True
-
-                print('\nUnfreezing the BERT layers.')
-                self.model.set_weights(self.best_weights)
-
-    def on_train_end(self, logs=None):
-        if self.stopped_epoch > 0:
-            #Unfreeze the BERT layers
-            for layer in self.model.layers:
-                layer.trainable = True
-            print('\nEpoch %05d: Ending first stage of training' % (self.stopped_epoch + 1))
 
 def initialize_vars(sess):
     sess.run(tf.local_variables_initializer())
@@ -492,6 +440,7 @@ def main():
 
 
     model = build_model(max_seq_length)
+
     #Set learning rate of the model
     K.set_value(model.optimizer.lr, 0.001) #Higher learning rate for first stage
     print("Learning rate: %f"%K.get_value(model.optimizer.lr))
@@ -499,6 +448,7 @@ def main():
     # Instantiate variables
     initialize_vars(sess)
 
+    es_first_stage = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=10, restore_best_weights=True)
     #Early stopping that waits 15 epochs after first increase in val_loss in order to avoid local minima
     es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=15)
     #Save the model with least validation loss
@@ -514,11 +464,18 @@ def main():
         ),
         epochs=100,
         batch_size=32,
-        callbacks=[StageTwo(10)],
+        callbacks=[es_first_stage],
         verbose=1
     )
 
-    print("Beginning stage two of training.")
+    print('\nUnfreezing the BERT layers.')
+    for layer in model.layers:
+        layer.trainable = True
+    model.compile(loss="binary_crossentropy", optimizer="adam", metrics=["accuracy"])
+    model.summary()
+    print("\nBeginning stage two of training.")
+
+    K.set_value(model.optimizer.lr, 0.0001) #Lower learning rate for second stage
 
     #Second stage (unforzen BERT layers)
     history = model.fit(
