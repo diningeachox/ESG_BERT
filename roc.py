@@ -17,6 +17,8 @@ from sklearn.metrics import roc_curve
 from sklearn.metrics import roc_auc_score, accuracy_score
 from matplotlib import pyplot
 
+os.environ['TF_KERAS'] = '1' #environment variable for RAdam
+from keras_radam import RAdam
 
 #np.set_printoptions(suppress=True)
 # Initialize session
@@ -28,15 +30,10 @@ bml.initialize_vars(sess)
 #Load custom layers such as BertLayer
 model = tf.keras.models.load_model("least_loss_model_two-stage.h5",
 custom_objects={'BertLayer': bml.BertLayer, 'precision_m': bml.precision_m,
-'recall_m': bml.recall_m})
+'recall_m': bml.recall_m, 'RAdam': RAdam})
 #model = load_model("bert_model.h5", custom_objects={'BertLayer': bml.BertLayer})
 
 print("BERT model succesfully loaded.")
-
-#Single category metrics
-
-
-
 
 #Take datasets to be the tweets csv
 train_df, test_df = bml.load_datasets_csv("modified_tweets.csv")
@@ -63,8 +60,6 @@ examples = bml.convert_text_to_examples(test_text, test_label)
 )
 
 pred = model.predict([test_input_ids, test_input_masks, test_segment_ids])
-
-
 #FPR-TPR curves for each class
 x = np.arange(-0.5,0.51,0.01) #x ranges from 0 to 1 in increments of 0.05
 for y in range(0, 13):
