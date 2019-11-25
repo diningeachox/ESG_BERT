@@ -16,6 +16,9 @@ from keras import regularizers
 from keras.regularizers import l2
 from keras.layers import Lambda
 
+
+os.environ['TF_KERAS'] = '1' #environment variable for RAdam
+from keras_radam import RAdam
 # Initialize session
 sess = tf.Session()
 
@@ -360,21 +363,18 @@ def build_model(max_seq_length):
     in_segment = tf.keras.layers.Input(shape=(max_seq_length,), name="segment_ids")
     bert_inputs = [in_id, in_mask, in_segment]
 
-    dropout_rate = 0
+    dropout_rate = 0.5
     #Freeze BERT layers for the first stage of training
-    bert_output = BertLayer(n_fine_tune_layers=3, trainable=False)(bert_inputs)
-    #bert_output.trainable = False
-    dense = tf.keras.layers.Dense(256, activation="sigmoid", trainable=False)(bert_output)
+    bert_output = BertLayer(n_fine_tune_layers=2, trainable=False)(bert_inputs)
+    #Add dropout to prevent overfitting
+    bert_dropout = tf.keras.layers.Dropout(rate=dropout_rate)(bert_output)
+    dense = tf.keras.layers.Dense(256, activation="sigmoid")(bert_dropout)
     dense_dropout = tf.keras.layers.Dropout(rate=dropout_rate)(dense)
-    pred = tf.keras.layers.Dense(classes, activation="sigmoid", trainable=False)(dense_dropout)
-    pred_dropout = tf.keras.layers.Dropout(rate=dropout_rate)(pred)
+    pred = tf.keras.layers.Dense(classes, activation="sigmoid")(dense_dropout)
     #Two extra FC layers added at the end
-    fc1 = tf.keras.layers.Dense(classes, activation="sigmoid")(pred_dropout)
-    fc1_dropout = tf.keras.layers.Dropout(rate=dropout_rate)(fc1)
-    fc2 = tf.keras.layers.Dense(classes, activation="sigmoid")(fc1_dropout)
 
-    model = tf.keras.models.Model(inputs=bert_inputs, outputs=fc2)
-    model.compile(loss="binary_crossentropy", optimizer="adam", metrics=["accuracy"])
+    model = tf.keras.models.Model(inputs=bert_inputs, outputs=pred)
+    model.compile(loss="binary_crossentropy", optimizer=RAdam(), metrics=["accuracy"])
     model.summary()
 
     return model
@@ -442,17 +442,17 @@ def main():
     model = build_model(max_seq_length)
 
     #Set learning rate of the model
-    K.set_value(model.optimizer.lr, 0.001) #Higher learning rate for first stage
+    K.set_value(model.optimizer.lr, 0.0001) #Higher learning rate for first stage
     print("Learning rate: %f"%K.get_value(model.optimizer.lr))
 
     # Instantiate variables
     initialize_vars(sess)
 
-    es_first_stage = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=10, restore_best_weights=True)
+    es_first_stage = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=5, restore_best_weights=True)
     #Early stopping that waits 15 epochs after first increase in val_loss in order to avoid local minima
-    es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=15)
+    es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=10)
     #Save the model with least validation loss
-    mc = ModelCheckpoint('least_loss_model_two-stage.h5', monitor='val_loss', mode='min', verbose=1, save_best_only=True)
+    mc = ModelCheckpoint('2stage_model.h5', monitor='val_loss', mode='min', verbose=1, save_best_only=True)
 
     #First stage
     history = model.fit(
@@ -471,11 +471,11 @@ def main():
     print('\nUnfreezing the BERT layers.')
     for layer in model.layers:
         layer.trainable = True
-    model.compile(loss="binary_crossentropy", optimizer="adam", metrics=["accuracy"])
+    model.compile(loss="binary_crossentropy", optimizer=RAdam(), metrics=["accuracy"])
     model.summary()
     print("\nBeginning stage two of training.")
 
-    K.set_value(model.optimizer.lr, 0.0001) #Lower learning rate for second stage
+    K.set_value(model.optimizer.lr, 0.00002) #Lower learning rate for second stage
 
     #Second stage (unforzen BERT layers)
     history = model.fit(
