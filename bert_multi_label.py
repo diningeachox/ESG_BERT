@@ -22,30 +22,13 @@ from keras_radam import RAdam
 # Initialize session
 sess = tf.Session()
 
-classes = 14 #14 classes in labelling
+classes = 13 #13 classes in labelling
 
 # Load tweets from the csv file
-def load_datasets_csv(file_path):
+def load_datasets_csv(train_path, test_path):
     # Read csv file and store it as a pandas Dataframe
-    df = pd.read_csv(file_path)
-    #Replace the NaN's by 0
-    df.replace(np.nan, '0', inplace=True)
-
-    total_rows = len(df.index)
-    train_rows = np.floor(0.8 * total_rows).astype(int)
-    test_rows = total_rows - train_rows
-
-    df = df.sample(frac=1).reset_index(drop=True)
-
-    train_df = df.head(train_rows)
-    test_df = df.tail(test_rows)
-
-    '''
-    #Select every fifth row to form our test set (so as to be representative of our data)
-    test_df = df.iloc[::5, :]
-    #Training set will be all the rest (by dropping every 5th row)
-    train_df = df.drop(df.index[::5], 0)
-    '''
+    train_df = pd.read_csv(train_path)
+    test_df = pd.read_csv(test_path)
 
     return train_df, test_df
 
@@ -298,7 +281,7 @@ def recall_m(y_true, y_pred, t=0):
     recall = true_positives / (possible_positives + K.epsilon())
     return recall
 
-#Recall score(or TPR): true positives / (true positives + false negatives)
+#Precision score: true positives / (true positives + false positives)
 def precision_single(y_true, y_pred, t, place):
     #Use our custom threshold of t
     rounded_y_pred = np.round(y_pred[:,place] + t)
@@ -395,21 +378,20 @@ def main():
     max_seq_length = 128
 
     #Take datasets to be the tweets csv
-    train_df, test_df = load_datasets_csv("modified_tweets.csv")
+    train_df, test_df = load_datasets_csv("train_data.csv","test_data.csv")
 
     # Create datasets (Only take up to max_seq_length words for memory)
     train_text = train_df["tweet_content"].tolist()
     train_text = [" ".join(t.split()[0:max_seq_length]) for t in train_text]
     train_text = np.array(train_text, dtype=object)[:, np.newaxis]
-    #Extract the 14 columns containing the ESG categories
-    train_label = train_df.iloc[:, 6:-1].values.tolist()
+    train_label = train_df.iloc[:, 7:-1].values.tolist()
     #Convert str to float
     train_label = [[float(entry) for entry in row] for row in train_label]
 
     test_text = test_df["tweet_content"].tolist()
     test_text = [" ".join(t.split()[0:max_seq_length]) for t in test_text]
     test_text = np.array(test_text, dtype=object)[:, np.newaxis]
-    test_label = test_df.iloc[:, 6:-1].values.tolist()
+    test_label = test_df.iloc[:, 7:-1].values.tolist()
     #Convert str to float
     test_label = [[float(entry) for entry in row] for row in test_label]
 
@@ -448,11 +430,11 @@ def main():
     # Instantiate variables
     initialize_vars(sess)
 
-    es_first_stage = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=5, restore_best_weights=True)
+    es_first_stage = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=3, restore_best_weights=True)
     #Early stopping that waits 15 epochs after first increase in val_loss in order to avoid local minima
     es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=10)
     #Save the model with least validation loss
-    mc = ModelCheckpoint('2stage_model.h5', monitor='val_loss', mode='min', verbose=1, save_best_only=True)
+    mc = ModelCheckpoint('2stage_model_v2.h5', monitor='val_loss', mode='min', verbose=1, save_best_only=True)
 
     #First stage
     history = model.fit(
@@ -471,11 +453,15 @@ def main():
     print('\nUnfreezing the BERT layers.')
     for layer in model.layers:
         layer.trainable = True
+        if isinstance(layer, tf.keras.layers.Dropout):
+            layer.rate = 0.8 #Raise the dropout rate when using the encoders
+            print("\nRaising the dropout rate to {}".format(layer.rate))
     model.compile(loss="binary_crossentropy", optimizer=RAdam(), metrics=["accuracy"])
     model.summary()
     print("\nBeginning stage two of training.")
 
     K.set_value(model.optimizer.lr, 0.00002) #Lower learning rate for second stage
+
 
     #Second stage (unforzen BERT layers)
     history = model.fit(
