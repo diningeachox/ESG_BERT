@@ -13,6 +13,7 @@ from keras.models import load_model
 from keras.utils import CustomObjectScope
 from keras.initializers import glorot_uniform
 import csv
+import inspect
 
 #SKLearn
 from sklearn.datasets import make_classification
@@ -26,6 +27,7 @@ from sklearn.metrics import roc_curve
 from sklearn.metrics import roc_auc_score, accuracy_score
 
 from matplotlib import pyplot
+from fpdf import FPDF
 
 os.environ['TF_KERAS'] = '1' #environment variable for RAdam
 from keras_radam import RAdam
@@ -38,15 +40,22 @@ max_seq_length = 128
 # Instantiate variables
 bml.initialize_vars(sess)
 #Load custom layers such as BertLayer
-model = tf.keras.models.load_model("2stage_model.h5",
+model = tf.keras.models.load_model("2stage_model_v2.h5",
 custom_objects={'BertLayer': bml.BertLayer, 'precision_m': bml.precision_m,
 'recall_m': bml.recall_m, 'RAdam': RAdam})
 #model = load_model("bert_model.h5", custom_objects={'BertLayer': bml.BertLayer})
 
+for layer in model.layers:
+    if isinstance(layer, tf.keras.layers.Dropout):
+        print(layer.name)
+        layer.rate = 0 #No dropout for test data
+model.compile(loss="binary_crossentropy", optimizer=RAdam(), metrics=["accuracy"])
+model.summary()
+
 print("BERT model succesfully loaded.")
 
 #Take datasets to be the tweets csv
-train_df, test_df = bml.load_datasets_csv("modified_tweets.csv")
+train_df, test_df = bml.load_datasets_csv("train_data.csv","test_data.csv")
 
 test_text = test_df["tweet_content"].tolist()
 test_text = [" ".join(t.split()[0:max_seq_length]) for t in test_text]
@@ -79,102 +88,59 @@ for i in range(0, 13):
     #Calculate PR curves
     precision, recall, _ = precision_recall_curve(test_labels[:, i], pred[:, i])
     pr_auc = auc(recall, precision)
-    # plot ROC curve
-    pyplot.plot(fpr, tpr, marker='.', label='ROC curve (area = %0.2f)' % roc_auc)
-    #x = y line
-    pyplot.plot([0,1], [0,1], linestyle='--')
-    # Add X and y Label
-    pyplot.xlabel('FPR')
-    pyplot.ylabel('TPR')
-    pyplot.title('ROC curve for class {}'.format(i+1))
 
-    # Add a grid
-    pyplot.grid(alpha=.4,linestyle='--')
-    pyplot.legend()
-    #Save the graph to a pgn file
-    pyplot.savefig("curves/roc_class{}.png".format(i+1))
-    print("Saved roc curve for class {}\n".format(i+1))
-    pyplot.clf()
+    # Smooth out the plot
+    step_kwargs = ({'step': 'post'}
+                   if 'step' in inspect.signature(pyplot.fill_between).parameters
+                   else {})
+    pyplot.step(recall, precision, color='b', alpha=0.2,
+             where='post')
+    pyplot.fill_between(recall, precision, alpha=0.2, color='b', **step_kwargs)
 
-    pyplot.plot(recall, precision, marker='.', label='PR curve (area = %0.2f)' % pr_auc)
-
-    #pyplot.plot([0,1], [0,1], linestyle='--')
-    # Add X and y Label
     pyplot.xlabel('Recall')
     pyplot.ylabel('Precision')
-    pyplot.title('PR curve for class {}'.format(i+1))
+    pyplot.ylim([0.0, 1.05])
+    pyplot.xlim([0.0, 1.0])
+    pyplot.title('2-class Precision-Recall Curve: AP={0:0.2f}'.format(
+              pr_auc))
 
-    # Add a grid
-    pyplot.grid(alpha=.4,linestyle='--')
-    pyplot.legend()
     #Save the graph to a pgn file
-    pyplot.savefig("curves/pr_class{}.png".format(i+1))
+    pyplot.savefig("new_curves/pr_class{}.png".format(i+1))
     print("Saved pr curve for class {}\n".format(i+1))
     pyplot.clf()
 
-'''
-#FPR-TPR curves for each class
-x = np.arange(-0.5,0.51,0.01) #x ranges from 0 to 1 in increments of 0.05
-for y in range(0, 13):
-    print("{}-th class".format(y+1))
-    #pre = [K.eval(bml.precision_single(test_labels, pred, val, y)) for val in x]
-    rec = [K.eval(bml.recall_single(test_labels, pred, val, y)) for val in x]
-    fpr = [K.eval(bml.fpr_single(test_labels, pred, val, y)) for val in x]
-    pre = [K.eval(bml.precision_single(test_labels, pred, val, y)) for val in x]
+
     # plot ROC curve
-    pyplot.plot(rec, pre, marker='.', label="PR curve")
-    #x = y line
-    #pyplot.plot([0,1], [0,1], linestyle='--')
-    # Add X and y Label
-    pyplot.xlabel('Recall')
-    pyplot.ylabel('Precision')
+    # Smooth out the plot
+    step_kwargs = ({'step': 'post'}
+                   if 'step' in inspect.signature(pyplot.fill_between).parameters
+                   else {})
+    pyplot.step(fpr, tpr, color='b', alpha=0.2,
+             where='post')
+    pyplot.fill_between(fpr, tpr, alpha=0.2, color='b', **step_kwargs)
 
-    # Add a grid
-    pyplot.grid(alpha=.4,linestyle='--')
+    pyplot.xlabel('FPR')
+    pyplot.ylabel('TPR')
+    pyplot.ylim([0.0, 1.05])
+    pyplot.xlim([0.0, 1.0])
+    pyplot.title('2-class Receiver Operating Characteristic Curve: AP={0:0.2f}'.format(
+              roc_auc))
 
-    # Add a Legend
-    pyplot.legend()
     #Save the graph to a pgn file
-    pyplot.savefig("curves/pr_class{}.png".format(y+1))
-    print("Saved roc curve for class {}\n".format(y+1))
-    #Clear plot for next graph
+    pyplot.savefig("new_curves/roc_class{}.png".format(i+1))
+    print("Saved roc curve for class {}\n".format(i+1))
     pyplot.clf()
-'''
 
-'''
-#FPR-TPR curves
-x = np.arange(-0.5,0.51,0.01) #x ranges from 0 to 1 in increments of 0.05
-pre = [K.eval(bml.precision_m(test_labels, pred, val)) for val in x]
-rec = [K.eval(bml.recall_m(test_labels, pred, val)) for val in x]
-fpr = [K.eval(bml.fpr_m(test_labels, pred, val)) for val in x]
-F1 = [2 * (x * y) / (x + y + K.epsilon()) for x, y in zip(pre, rec)]
-one_minus_fpr = [1 - K.eval(bml.fpr_m(test_labels, pred, val)) for val in x]
-'''
-
-'''
-# plot ROC curve
-pyplot.plot(fpr, rec, marker='.', label="ROC curve")
-#x = y line
-pyplot.plot([0,1], [0,1], linestyle='--')
-# Add X and y Label
-pyplot.xlabel('FPR')
-pyplot.ylabel('TPR')
-'''
-
-'''
-#Plot TPR vs 1 - FPR
-pyplot.plot(x, tpr, marker='.', label="TPR")
-#pyplot.plot(x, one_minus_fpr, marker='.', label="1 - FPR")
-
-# Add X and y Label
-pyplot.xlabel('Cutoff')
-pyplot.ylabel('Score')
-
-# Add a grid
-pyplot.grid(alpha=.4,linestyle='--')
-
-# Add a Legend
-pyplot.legend()
-
-pyplot.show()
-'''
+#Save the pgn files to a single PDF
+path = "new_curves\\"
+# r=root, d=directories, f = files
+files = []
+for r, d, f in os.walk(path):
+    for file in f:
+        if '.png' in file:
+            files.append(os.path.join(r, file))
+pdf = FPDF()
+for image in files:
+    pdf.add_page()
+    pdf.image(image, x=0, y=0)
+pdf.output("new_curves\\charts.pdf", "F")
