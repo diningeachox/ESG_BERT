@@ -33,7 +33,7 @@ custom_objects={'BertLayer': bml.BertLayer, 'precision_m': bml.precision_m,
 
 print("BERT model succesfully loaded.")
 #Take datasets to be the tweets csv
-train_df, test_df = bml.load_datasets_csv("modified_tweets.csv")
+train_df, test_df = bml.load_datasets_csv("train_data.csv", "test_data.csv")
 
 test_text = test_df["tweet_content"].tolist()
 test_text = [" ".join(t.split()[0:max_seq_length]) for t in test_text]
