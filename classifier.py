@@ -26,7 +26,7 @@ max_seq_length = 128
 # Instantiate variables
 bml.initialize_vars(sess)
 #Load custom layers such as BertLayer
-model = tf.keras.models.load_model("2stage_model.h5",
+model = tf.keras.models.load_model("2stage_model_v2.h5",
 custom_objects={'BertLayer': bml.BertLayer, 'precision_m': bml.precision_m,
 'recall_m': bml.recall_m, 'RAdam': RAdam})
 #model = load_model("bert_model.h5", custom_objects={'BertLayer': bml.BertLayer})
