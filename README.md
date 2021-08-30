@@ -38,5 +38,7 @@ Following is the full list of hyperparameters we used to train our classifier:
 
 Identifying clusters in feature space:
 Already with a relatively small dataset of ~6000 samples, we can identify certain clusters in the data corresponding to certain categories.
-
+<p>
+<img src="https://github.com/diningeachox/ESG_BERT/blob/master/F3.large.jpg" width=500></img>
+<\p>
 See our paper here: https://jesg.pm-research.com/content/early/2021/01/09/jesg.2021.1.010
