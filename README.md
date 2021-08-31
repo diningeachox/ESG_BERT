@@ -5,7 +5,7 @@ ESG stands for Environmental, Social, and Governance. Examples include climate c
 
 This project uses the BERT model in NLP to classify tweets related to S&P 500 companies, in order to detect any red flags regarding their ESG categories. 
 
-Data collection:
+## Data collection:
   
 We collected 6617 tweets (including retweets) which mentioned or discussed S&P 500 companies over a period of one month from June 8, 2019 to July 8, 2019. Each tweet was given a positive or negative label for each ESG category it is in violation of.
 For example, the tweet "copyright suit against microsoft is precluded by earlier patent suit | the recorder https://t.co/ltpe5zrq3v" is given a positive label in the copyright category (which falls under the governmence (G) part of ESG).
@@ -21,7 +21,7 @@ Our data set covers 10 ESG topics:
 
 ▪ Environmental: Climate Change and Carbon Emissions, Toxic Emissions & Waste
 
-Model:
+## Model:
 We employed the Bidirectional Encoder Representations from Transformers (BERT) model, which is state-of-the-art in natural language processing (NLP). A big advantage of this model is that it is very good at learning atomized parts of a word such as prefixes and suffixes. This makes it a particularly good fit for analyzing tweets, which often contain abbreviations and shortened words due to the 144 character constraint. 
 
 Following is the full list of hyperparameters we used to train our classifier:
@@ -36,7 +36,7 @@ Following is the full list of hyperparameters we used to train our classifier:
 
 ▪ We utilize the RADAM (Liu et al. 2020) optimizer with learning rates of Embedded Image during the first stage of training, and Embedded Image during the second stage of training (where BERT encoder layers are fine tuned); the RADAM optimizer simplifies the learning rate hyperparameter search and removes the need for running “warm-up” epochs. We used no warm-up for training our model.
 
-Identifying clusters in feature space:
+## Identifying clusters in feature space:
 Already with a relatively small dataset of ~6000 samples, we can identify certain clusters in the data corresponding to certain categories.
 <p>
   <figure>
