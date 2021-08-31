@@ -3,7 +3,9 @@
 Corporations all around the world have become more interested in ventures which follow ESG categories.
 ESG stands for Environmental, Social, and Governance. Examples include climate change, inclusivity & diversity, and corruption. These are categories designed to gauge an organization's non-financial behavior. Studies have shown that companies who display characteristics of ESG categories also tend to be more profitable, and that companies which violate these categories also present more financial risk.
 
-This project uses the BERT model in NLP to classify tweets related to S&P 500 companies, in order to detect any red flags regarding their ESG categories. 
+This project uses the BERT model in NLP to classify tweets related to S&P 500 companies, in order to detect any red flags regarding their ESG categories.
+
+See our paper here: https://jesg.pm-research.com/content/early/2021/01/09/jesg.2021.1.010
 
 ## Data collection
   
@@ -45,4 +47,3 @@ Already with a relatively small dataset of ~6000 samples, we can identify certai
   </figure>
 </p>
 
-See our paper here: https://jesg.pm-research.com/content/early/2021/01/09/jesg.2021.1.010
